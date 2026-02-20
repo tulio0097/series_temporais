@@ -1,0 +1,215 @@
+---
+title: "Análise - Previdência Social"
+author: "Túlio Herculano"
+format: html
+editor: visual
+---
+
+```{r}
+#| include: false
+library(TSA)
+library(forecast)
+library(fpp3)
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(lubridate)
+```
+
+## Previdência Social - fluxo de caixa da previdência: arrecadação líquida
+
+Este estudo tem como objetivo à aplicação das tecnincas de Séries Temporais para conhecer, avaliar, discutir e propor mudanças que permitam sua adequação às necessidades sociais, que evoluem continuamente. Os dados seguem uma frequência mensal, referentes ao período de 2003.2 (fevereiro) até 2025.11 (novembro).
+
+O Fluxo de caixa da Previdência é o instrumento que relaciona os ingressos e saídas de recursos monetários, neste caso, no âmbito da previdência em determiando intervalo de tempo. A Arrecadação Líquida é o valor da arrecadação bruta deduzidos os ressarcimentos, restituições e repasses a terceiros (arrecadação de outras entidades).
+
+# Fonte
+
+Os dados foram extraidos da plataforma governamental IPEADATA e, também, são publicados anualmente através do Anuário Estatístico da Previdência Social - AEPS.
+
+pode ser acessado através do seguinte link: https://www.ipeadata.gov.br/Default.aspx.
+
+# Dados - Importação e Preparação
+
+Nossa série é composta por duas
+
+```{r echo=FALSE, warning=F, message=F}
+library(readr)
+library(dplyr)
+ipeadata_04_02_2026_07_46_ <- read_delim("ipeadata[04-02-2026-07-46].csv", 
+                                         delim = ";", escape_double = FALSE, trim_ws = TRUE)
+
+# Alterando nome das colunas 
+df_01 <- ipeadata_04_02_2026_07_46_ %>% 
+  select(-...3) %>% 
+  rename(Data = Data,
+         Fluxo_De_Caixa = "Previdência Social - fluxo de caixa da previdência - arrecadação líquida - R$ - Ministério da Previdência Social, Boletim Estatístico da Previdência Social (MPS) - MPAS12_ARRLIQ12")
+head(df_01)
+tail(df_01)
+```
+
+```{r, warning=F, message=F}
+#| echo: false
+# Transformando em um objeto de série temporal (ts)
+# Considerando que os dados são mensais e começam em Fev/2003
+serie_fluxo <- ts(df_01$Fluxo_De_Caixa, 
+                  start = c(2003, 2), 
+                  frequency = 12)
+
+plot(serie_fluxo)
+
+```
+
+É perceptivel que nossa série tem uma mudança de comportamento absurda, em decorrência deste fato, iremos reduzir nosso recorte temporal para 2015-01 até 2025-12. Nossa análise terá continuação a partir de agora com a seguinte série:
+
+```{r message=FALSE, warning=FALSE}
+#| echo: false
+library(tsibble)
+library(ggplot2)
+# Transformar o formato decimal em data regular
+serie_fluxo <- df_01 %>%
+  mutate(
+    # Extrai ano da parte inteira
+    ano = floor(Data),
+    # Extrai mês da parte decimal (multiplica por 100 para obter mês como inteiro)
+    mes = round((Data - ano) * 100),
+    # Cria data no formato ano-mês
+    Data_ts = yearmonth(paste(ano, mes, sep = "-"))
+  ) %>%
+  # Seleciona e renomeia colunas
+  select(date = Data_ts, Fluxo_De_Caixa) %>%
+  # Ordena por data
+  arrange(date)
+
+# Converte para tsibble
+serie_fluxo_ts <- as_tsibble(serie_fluxo, index = date)
+
+# Filtrar APENAS o período de interesse (2015-2025)
+serie_2015_2025 <- serie_fluxo_ts %>%
+  filter_index("2015-01" ~ "2025-12")
+
+serie_fluxo_01 <- ts(serie_2015_2025$Fluxo_De_Caixa, 
+                  start = c(2015, 1), 
+                  frequency = 4)
+#plot(serie_fluxo_01)
+### Plot da serie
+serie_2015_2025 %>%
+  pivot_longer(-date) %>%
+  ggplot(aes(x = date, y = value, colour = name)) +
+  geom_line() +
+  facet_grid(name ~ ., scales = "free_y")
+```
+
+Agora podemos verificar que há uma diferença nitida em relação ao comportamento anterior, porém, temos uma grande redução do nosso recorte histórico. Para evitar essa perda, a transformação logaritmica na escala da arrecadação é uma possível resolução para este problema da visualização de toda a série.
+
+Há um comportamento que indica sazonalidade, podendo ser um reflexo de politicas socioeconomicas, como por exemplo, 13º salario que é, também, um mecanismo de injeção e movimentação econômica.
+
+# Extraindo os componentes da serie temporal
+
+Tendência, Sazonalidade e Erro/Ruido, são os componentes que estruturam uma série temporal. De maneira análoga, neste ponto da análise pretendemos estudar esses componentes de forma "isolada", objetivando a visualização de possíveis
+
+## Decomposição - Aditiva
+
+```{r echo=FALSE, warning=F, message=F}
+# Modelo simples, com decomposição clássica
+modelo_decomposicao <- serie_2015_2025 %>%
+  model(classical_decomposition(Fluxo_De_Caixa, type = "additive"))
+
+# Extrai os componentes (decomposição)
+componentes <- components(modelo_decomposicao)
+
+# Plot
+autoplot(componentes) +
+  labs(title = "Decomposição clássica aditiva do total de arrecadação liquida")
+```
+
+# Decomposição - Multiplicativa
+
+```{r message=FALSE, warning=FALSE}
+#| echo: false
+serie_2015_2025 %>%
+  model(
+    classical_decomposition(Fluxo_De_Caixa, type = "multiplicative")
+  ) %>%
+  components() %>%
+  autoplot() +
+  labs(title = "Decomposição classica aditiva do total de arrecadação liquida")
+```
+
+# Previsão
+
+Após a divisão da Série em Treino e Teste sendo os respectivos intervalos;
+
+-   Treino: janeiro de 2015 até dezembro de 2025
+
+-   Teste: a partir de 2025 (para 2026)
+
+```{r echo: false}
+#| echo: false
+#### Forecast ---- 
+## A Série inicia em 2003.02 e vai até 2025.06
+# Definindo a base de dados em treinamento e teste
+train <- serie_2015_2025 %>%
+  filter_index("2015-01" ~ "2024-12")
+
+test <- serie_fluxo_ts %>%
+  filter_index("2025-01" ~ .);test
+
+### verificando se esta correto
+head(test)
+tail(test)
+```
+
+```{r message=FALSE, warning=FALSE}
+#| echo: false
+library(fable)
+# Estimando o modelo de suavizacao
+Fluxo_Prev_fit <- train %>%
+  model(
+    # Holt multiplicativo
+    HoltM = ETS(Fluxo_De_Caixa ~ error("M") + trend("A") + season("N")),
+    
+    # Holt-Winters aditivo
+    HW_Add = ETS(Fluxo_De_Caixa ~ error("A") + trend("A") + season("A")),
+    
+    # Holt-Winters multiplicativo
+    HW_Mult = ETS(Fluxo_De_Caixa ~ error("M") + trend("A") + season("M")),
+    
+    # ARIMA
+    ARIMA = ARIMA(Fluxo_De_Caixa),
+    
+    #
+    NNETAR = NNETAR(Fluxo_De_Caixa)
+  )
+Fluxo_Prev_fit
+
+
+# GERANDO UMA PREVISAO h = 4 passos 
+Fluxo_Prev_fc <- Fluxo_Prev_fit %>% forecast(h = 12)
+Fluxo_Prev_fc
+
+# Grafico da serie com as previsoes 
+Fluxo_Prev_fc %>%
+  autoplot(train, level = NULL) +
+  autolayer(
+    test,
+    colour = "black"
+  ) +
+  labs(
+    y = "Quantidade arrecada - Previdência Social",
+    title = "Previsão de arrecadação trimestrais para previdência"
+  ) +
+  guides(colour = guide_legend(title = "Forecast"))
+```
+
+# Interpretação dos Resultados
+
+A série apresenta tendência crescente persistente, forte sazonalidade anual e estrutura multiplicativa.
+
+Modelos que incorporam sazonalidade multiplicativa apresentaram melhor desempenho preditivo, evidenciando que a amplitude sazonal cresce proporcionalmente ao nível da arrecadação.
+
+As previsões indicam continuidade da trajetória crescente no curto prazo, sugerindo manutenção da capacidade arrecadatória da Previdência Social, embora fatores macroeconômicos possam influenciar a dinâmica futura.
+
+# Conclusão
+
+O uso de modelos de suavização exponencial mostrou-se adequado para capturar a dinâmica da arrecadação líquida da Previdência Social. O modelo selecionado (ARIMA) apresentou bom desempenho preditivo e permite auxiliar o planejamento fiscal e a tomada de decisão.
